@@ -206,6 +206,60 @@ def collapse_single_child(node: dict) -> dict:
     return node
 
 
+def delete_session(sessions: list[dict], uuid: str, assume_yes: bool) -> int:
+    """Delete the session whose uuid matches `uuid` (full or unique prefix).
+    Removes the .jsonl file and rmdirs its project directory if left empty."""
+    matches = [s for s in sessions if s["uuid"] == uuid]
+    if not matches:  # fall back to prefix match
+        matches = [s for s in sessions if s["uuid"].startswith(uuid)]
+
+    if not matches:
+        print(f"No session matching '{uuid}'.", file=sys.stderr)
+        return 1
+    if len(matches) > 1:
+        print(f"'{uuid}' is ambiguous — matches {len(matches)} sessions:", file=sys.stderr)
+        for s in matches:
+            print(f"  {s['uuid']}  {truncate(s['title'], 60)}", file=sys.stderr)
+        return 1
+
+    s = matches[0]
+    path = Path(s["file"])
+    print(f"About to delete:\n  {path}\n  title: {truncate(s['title'], 70)}"
+          f"\n  {fmt_date(s['mtime'])} · {s['msgs']} msgs")
+
+    if not assume_yes:
+        if not sys.stdin.isatty():
+            print("Refusing to delete without confirmation; pass --yes for non-interactive use.",
+                  file=sys.stderr)
+            return 1
+        try:
+            ans = input("Delete this session? [y/N] ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("y", "yes"):
+            print("Aborted.")
+            return 1
+
+    try:
+        path.unlink()
+    except OSError as e:
+        print(f"Failed to delete {path}: {e}", file=sys.stderr)
+        return 1
+    print(f"Deleted {path.name}")
+
+    proj = path.parent
+    try:
+        if not any(proj.iterdir()):
+            proj.rmdir()
+            print(f"Removed empty project directory {proj}")
+        elif not any(proj.glob("*.jsonl")):
+            print(f"Note: {proj} has no sessions left but still contains other files; "
+                  f"left in place.")
+    except OSError as e:
+        print(f"Could not remove directory {proj}: {e}", file=sys.stderr)
+    return 0
+
+
 def sort_sessions(sessions: list[dict], key: str) -> list[dict]:
     if key == "msgs":
         return sorted(sessions, key=lambda s: -s["msgs"])
@@ -514,6 +568,11 @@ def main(argv=None):
     ap.add_argument("--html", metavar="FILE", type=Path, default=None,
                     help="Write an interactive HTML page instead of CLI output.")
     ap.add_argument("--json", action="store_true", help="Dump raw session metadata as JSON.")
+    ap.add_argument("--delete", metavar="UUID", default=None,
+                    help="Delete the session with this uuid (full or unique prefix), "
+                         "then rmdir its project dir if empty. Prompts unless --yes.")
+    ap.add_argument("-y", "--yes", action="store_true",
+                    help="Skip the confirmation prompt for --delete.")
     ap.add_argument("--no-collapse", action="store_true",
                     help="Do not collapse single-child directory chains.")
     ap.add_argument("-s", "--summary", action="store_true",
@@ -523,6 +582,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     sessions = collect_sessions(args.projects_dir)
+
+    if args.delete:
+        return delete_session(sessions, args.delete, args.yes)
 
     if args.root:
         root_abs = os.path.abspath(os.path.expanduser(args.root))
